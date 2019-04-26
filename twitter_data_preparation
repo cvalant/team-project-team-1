@@ -1,0 +1,321 @@
+from datetime import datetime
+import json
+from nltk.corpus import stopwords
+import numpy as np
+import os
+import pandas as pd
+import re
+from wordcloud import STOPWORDS
+
+def get_stopwords():
+    '''Get english stopwords from ntlk corpus module.'''
+    custom_stopwords = ["amp", "al", "op", "xe", "ri", "sd", "el", "xa", "xc", "it",
+                        "in", "ll", "cd", "ft", "co", "xf", "mn", "za", "mt", "gt"]
+    return(STOPWORDS.union(set(stopwords.words("english"))).union(custom_stopwords))
+
+def get_URLs(words_array):
+    '''Extract URLs from the array of words.
+    
+    Notes
+    -----
+    Do this before filtering out punctuation.
+    '''
+    return([word for word in words_array if "https" in word])
+
+def remove_URLS(words_array):
+    '''Find and remove URLs from words array.
+    
+    Returns
+    -------
+    words_array_noURLs : numpy
+        The words array without URLs.
+    URLs : list of strings
+        A list of the URLs extracted.
+    '''
+    URLs = get_URLs(words_array)
+    words_array_noURLs = [word for word in words_array if word not in URLs]
+    return(words_array_noURLs, URLs)
+
+def remove_punctuation(words_array):
+    '''Find and remove punctuation from words array, ignoring @ and #.
+    
+    Make sure to supply a words array without URLs.
+    
+    Returns
+    -------
+    words_array_noPunc : numpy (n x 1) array
+        All words in twitter messages where n in the number of words.
+    '''
+    lone_nums = " \d+" # Remove numbers that are not part of words. This is a customization specific to twitter.
+    # Escape characters, flagged with (\s) are not ignored, they are removed in the following.
+    # Also not currently able to read special characters in twitter messages like other language's characters.
+    punc_custom = r'[^\w@#]' # Remove everything except [a-zA-Z0-9_] (the \w) and @ and #.
+    words_array_noPunc = re.sub(lone_nums, "", re.sub(punc_custom, " ", " ".join(words_array))).split(" ")
+    words_array_noPunc = [word for word in words_array_noPunc if len(word)>1] # Ignore empties.
+    return(words_array_noPunc)
+
+def get_twitter_handles(words_array):
+    '''Find and return twitter handles from words array.
+    
+    Returns
+    -------
+    twitter_handles : list of strings
+        A list of twitter handles extracted from the words array.
+    '''
+    twitter_handles = [word for word in words_array if word[0]=="@"]
+    return(twitter_handles)
+
+def get_hashtags(words_array):
+    '''Find and return all hashtags in the words array.
+    
+    Returns
+    -------
+    hashtags : list of strings
+        A list of hashtags extracted from the words array.
+    '''
+    hashtags = [word for word in words_array if word[0]=="#"]
+    return(hashtags)
+
+def get_words_from_series(series):
+    '''Get filtered words by elites.
+    
+    Parameters
+    ----------
+    elite : None or iterable tuple (e.g. (1,) with comma at end)
+        If None, collect words for all elites in data set.
+        If iterable tuple, iterate over those specific elites.
+    
+    Returns
+    -------
+    words_list_filtered : list of strings
+    '''
+    # Get all words from the twitter message feature.
+    # Place them in an list with one element per word (character group separated by a space).
+    words_list = [word for word in series.text.split(" ") if len(word)>1] # Remove empties.
+    # Remove stop words before punctuation.
+    words_list = [word for word in words_list if word not in get_stopwords()]
+    # Find and remove URLs in the words list.
+    words_list, URLs = remove_URLS(words_list)
+    # Find and remove punctuation in the words list.
+    words_list = remove_punctuation(words_list) # URLs removed from words list here.
+    # Extract twitter handles.
+    twitter_handles = get_twitter_handles(words_list)
+    # Extract hashtags.
+    hashtags = get_hashtags(words_list)
+    # Filter URLs, Twitter Handles, and Hashtags from data.
+    words_list_filtered = [word.lower() for word in words_list \
+                           if word not in twitter_handles \
+                           and word not in hashtags]
+    # Remove numbers.
+    words_list_filtered = [word for word in re.sub("[\d]", " ", " ".join(words_list_filtered)).split(" ") if len(word)>1]
+    # Remove stopwords again (those that were attached to numbers).
+    words_list_filtered = [word for word in words_list_filtered if word not in get_stopwords()]
+    return(twitter_handles, hashtags, words_list_filtered)
+
+def create_main_page_file(folder):
+    """Create the MainPage.txt file to add to during stream processing."""
+    filepath = os.path.join(folder, "MainPage.txt")
+    
+    emtpy_main_page_file = {
+                            "word cloud": 
+                              {
+                               "conservative": 
+                                {# The first distinct word corresponds to the first word frequency, they are ordered the same.
+                                 "distinct elites": list([]),
+                                 "elite frequencies": list([])
+                                },
+                               "liberal": 
+                                {
+                                 "distinct elites": list([]),
+                                 "elite frequencies": list([])
+                                },
+                              },
+                            "stats":
+                              {
+                               "gender":
+                                {
+                                 "male": 0.0,
+                                 "female": 0.0
+                                },
+                               "race":
+                                {
+                                 "non-white": 0.0,
+                                 "white": 0.0
+                                },
+                              } 
+                            }
+    json.dump(emtpy_main_page_file, open(filepath, "w"))
+
+def get_and_transform_values(series):
+    # Make sure all columns are present.
+    assert(all([feature in series.keys() for feature in \
+               ["text", "elite", "retweet_count", "media", "gender", "dw_score", "race", "age", "followers"]]))
+    # Look up [name, age, gender, race, dw_score, # followers, # retweets, media].
+    # media:    -0.5 -> Yes        | +0.5 -> No  
+    # gender:   -0.5 -> Female     | +0.5 -> Male  
+    # dw_score:  < 0 -> Liberal    |  > 0 -> Conservative, only continuous scale
+    # race:     -0.5 -> Non-White  | +0.5 -> White
+    name = series.elite
+    age = series.age # Specific to time of tweet. For now just have it report age at the time of the latest tweet.
+    if series.gender < 0:
+        gender = "Female"
+    else:
+        gender = "Male"
+    if series.race < 0:
+        race = "Non-White"
+    else:
+        race = "White"
+    if series.dw_score < 0:
+        position = "Liberal"
+    else:
+        position = "Conservative"
+    num_followers = series.followers
+    num_retweets = series.retweet_count
+    if series.media < 0:
+        media = True
+    else:
+        media = False
+    return(name, age, gender, race, position, num_followers, num_retweets, media)
+
+def update_word_clouds_field(elite_file, distinct_text, text_freq, labels_key, freq_key):
+    """Update the Words, Twitter Handles, and Hashtags lists."""
+    new_labels = []
+    new_label_freqs = []
+    for dtext, freq in zip(distinct_text, text_freq):
+        if dtext in elite_file["word clouds"][labels_key]:
+            ind = np.nonzero(np.array(elite_file["word clouds"][labels_key]) == dtext)[0][0]
+            elite_file["word clouds"][freq_key][ind] += freq
+        else:
+            new_labels.append(dtext)
+            new_label_freqs.append(float(freq))
+    if len(new_labels):
+        elite_file["word clouds"][labels_key].extend(new_labels)
+        elite_file["word clouds"][freq_key].extend(new_label_freqs)
+    return(elite_file)
+
+def create_or_update_files(series, folder):
+    """Do the appropriate word processing and compute stats to create of update elite file in folder.
+    
+    Parameters
+    ----------
+    folder : str
+        The folder where the elite files are.
+    """
+    name, age, gender, race, position, num_followers, num_retweets, media = get_and_transform_values(series=series)
+    twitter_handles, hashtags, words_list_filtered = get_words_from_series(series=series)
+    distinct_twitterhandles, twitterhandle_freq = np.unique(twitter_handles, return_counts=True)
+    distinct_hashtags, hashtag_freq = np.unique(hashtags, return_counts=True)
+    distinct_words, word_freq = np.unique(words_list_filtered, return_counts=True)
+
+    # Create/Update Word Clouds
+    # -------------------------------------------------------------------------------------
+    # Check if file for this individual exists.
+    filename = f"{name}.txt"
+    filepath = os.path.join(folder, filename)
+    if filename not in os.listdir(folder):
+        elite_file = {"word clouds":
+                        {# The first distinct word corresponds to the first word frequency, they are ordered the same.
+                         "distinct words": list(distinct_words),
+                         "word frequencies": list(word_freq.astype(float)),
+                         "distinct twitter handles": list(distinct_twitterhandles),
+                         "twitter handle frequencies": list(twitterhandle_freq.astype(float)),
+                         "distinct hashtags": list(distinct_hashtags),
+                         "hashtag frequencies": list(hashtag_freq.astype(float))
+                        },
+                      "stats":
+                        {"name": name,
+                         "age": float(age),
+                         "gender": gender,
+                         "position": position, # Liberal or Conservative.
+                         "number of followers": float(num_followers),
+                         "total number of tweets": 1.0,
+                         "number of distinct words used": len(distinct_words),
+                         "top 5 words": list(distinct_words[np.argsort(word_freq)][::-1][:5]),
+                         "bottom 5 words": list(distinct_words[np.argsort(word_freq)][:5]),
+                         "retweet history": list([float(num_retweets)]),
+                         "average retweet count": float(num_retweets),
+                         "tweets with media history": list([media]),
+                         "percent of tweets with media": 100.0
+                        }}
+    else:
+        elite_file = json.load(open(filepath, 'r'))        
+        ## Update Words
+        elite_file = update_word_clouds_field(elite_file,
+                                              distinct_text=distinct_words,
+                                              text_freq=word_freq,
+                                              labels_key="distinct words",
+                                              freq_key="word frequencies")
+        
+        # Update Twitter Handles
+        elite_file = update_word_clouds_field(elite_file,
+                                              distinct_text=distinct_twitterhandles,
+                                              text_freq=twitterhandle_freq,
+                                              labels_key="distinct twitter handles",
+                                              freq_key="twitter handle frequencies")
+        
+        # Update Hashtags
+        elite_file = update_word_clouds_field(elite_file,
+                                              distinct_text=distinct_hashtags,
+                                              text_freq=hashtag_freq,
+                                              labels_key="distinct hashtags",
+                                              freq_key="hashtag frequencies")
+        
+        ## Update Stats
+        elite_file["stats"]["age"] = float(age)
+        elite_file["stats"]["position"] = position
+        elite_file["stats"]["number of followers"] = float(num_followers)
+        elite_file["stats"]["total number of tweets"] += 1.0
+        elite_file["stats"]["number of distinct words used"] = len(elite_file["word clouds"]["distinct words"])
+        inds_sorted = np.argsort(elite_file["word clouds"]["word frequencies"]) # Sort the indices based on frequency.
+        elite_file["stats"]["top 5 words"] = list(np.array(elite_file["word clouds"]["distinct words"])[inds_sorted][::-1][:5])
+        elite_file["stats"]["bottom 5 words"] = list(np.array(elite_file["word clouds"]["distinct words"])[inds_sorted][:5])
+        elite_file["stats"]["retweet history"].extend([float(num_retweets)])
+        elite_file["stats"]["average retweet count"] = np.mean(elite_file["stats"]["retweet history"])
+        elite_file["stats"]["tweets with media history"].extend([media])
+        num_w_media = np.sum(elite_file["stats"]["tweets with media history"])
+        total_tweets = len(elite_file["stats"]["tweets with media history"])
+        elite_file["stats"]["percent of tweets with media"] = 100.0 * num_w_media / total_tweets
+    
+    # Save elite file.
+    json.dump(elite_file, open(filepath, 'w'))
+    # -------------------------------------------------------------------------------------
+    
+    
+    # Main File Processing
+    # -------------------------------------------------------------------------------------
+    if "MainPage.txt" not in os.listdir(folder):
+        create_main_page_file(folder)
+    # Get file.
+    filepath = os.path.join(folder, "MainPage.txt")
+    main_page_file = json.load(open(filepath, "r"))
+    assert(position.lower() in main_page_file["word cloud"].keys())
+    # Update distinct elites and elite frequencies.
+    if name in main_page_file["word cloud"][position.lower()]["distinct elites"]:
+        ind = (np.array(main_page_file["word cloud"][position.lower()]["distinct elites"]) == name).nonzero()[0][0]
+        main_page_file["word cloud"][position.lower()]["elite frequencies"][ind] += 1.0
+    else: # Add the new distinct name to the list along with 1 for the corresponding frequency list.
+        main_page_file["word cloud"][position.lower()]["distinct elites"].append(name)
+        main_page_file["word cloud"][position.lower()]["elite frequencies"].append(1.0)
+        # Update stats fields only if this is a new individual.
+        assert(gender.lower() in main_page_file["stats"]["gender"].keys())
+        main_page_file["stats"]["gender"][gender.lower()] += 1.0
+        assert(race.lower() in main_page_file["stats"]["race"].keys())
+        main_page_file["stats"]["race"][race.lower()] += 1.0
+    
+    # Save updated MainPage file.
+    json.dump(main_page_file, open(filepath, "w"))
+    # -------------------------------------------------------------------------------------
+    return(None)
+
+
+# Main Process
+# ------------
+start_time = datetime.now()
+# Change folder to data location if needed.
+folder = "."
+# Read in data.
+df = pd.read_csv("congress_raw.csv")
+for i in range(len(df)):
+    create_or_update_files(series=df.iloc[i,:], folder=folder)
+end_time = datetime.now()
+print("Total time:", (end_time - start_time))
