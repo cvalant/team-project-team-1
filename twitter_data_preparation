@@ -193,19 +193,27 @@ def update_word_clouds_field(elite_file, distinct_text, text_freq, labels_key, f
         elite_file["word clouds"][freq_key].extend(new_label_freqs)
     return(elite_file)
 
-def create_or_update_files(series, folder):
+def create_or_update_files(series, folder, min_occurences=2):
     """Do the appropriate word processing and compute stats to create of update elite file in folder.
     
     Parameters
     ----------
+    series : pandas.Series
+        A single row from a pandas DataFrame of new data.
     folder : str
         The folder where the elite files are.
+    min_occurences : int
+        The minimum allowed occurences of a word
     """
     name, age, gender, race, position, num_followers, num_retweets, media = get_and_transform_values(series=series)
     twitter_handles, hashtags, words_list_filtered = get_words_from_series(series=series)
     distinct_twitterhandles, twitterhandle_freq = np.unique(twitter_handles, return_counts=True)
     distinct_hashtags, hashtag_freq = np.unique(hashtags, return_counts=True)
     distinct_words, word_freq = np.unique(words_list_filtered, return_counts=True)
+    
+    # Filter out words with frequency equal to or less than a given number.
+    distinct_words = distinct_words[word_freq > min_occurences]
+    word_freq = word_freq[word_freq > min_occurences]
 
     # Create/Update Word Clouds
     # -------------------------------------------------------------------------------------
@@ -306,7 +314,6 @@ def create_or_update_files(series, folder):
     json.dump(main_page_file, open(filepath, "w"))
     # -------------------------------------------------------------------------------------
     return(None)
-
 
 # Main Process
 # ------------
